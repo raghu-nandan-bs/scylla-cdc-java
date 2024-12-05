@@ -1,26 +1,23 @@
 package com.scylladb.cdc.replicator;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+
 import com.datastax.driver.core.Cluster;
 import com.datastax.driver.core.ConsistencyLevel;
 import com.datastax.driver.core.KeyspaceMetadata;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.TableMetadata;
-import com.scylladb.cdc.cql.CQLConfiguration;
-import com.scylladb.cdc.cql.driver3.Driver3Session;
 import com.scylladb.cdc.lib.CDCConsumer;
 import com.scylladb.cdc.model.TableName;
+
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
 import sun.misc.Signal;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.CountDownLatch;
 
 public class Main {
     public static void main(String[] args) {
@@ -32,23 +29,44 @@ public class Main {
         String keyspace = parsedArguments.getString("keyspace");
         String table = parsedArguments.getString("table");
         ConsistencyLevel consistencyLevel = ConsistencyLevel.valueOf(parsedArguments.getString("consistency_level").toUpperCase());
+        String sourceUsername = parsedArguments.getString("source_username");
+        String sourcePassword = parsedArguments.getString("source_password");
+        String destinationUsername = parsedArguments.getString("destination_username");
+        String destinationPassword = parsedArguments.getString("destination_password");
 
         // Start replicating changes from source cluster to destination cluster
         // of selected tables.
-        startReplicator(replicatorMode, source, destination, keyspace, table, consistencyLevel);
+        startReplicator(replicatorMode, source, destination, keyspace, table, consistencyLevel, sourceUsername, sourcePassword, destinationUsername, destinationPassword);
     }
 
     private static void startReplicator(Mode mode, String source, String destination, String keyspace, String tables,
-                                        ConsistencyLevel consistencyLevel) {
-        // Connect to the destination cluster.
-        try (Cluster destinationCluster = Cluster.builder().addContactPoint(destination).build();
+                                        ConsistencyLevel consistencyLevel, String sourceUsername, String sourcePassword, String destinationUsername, String destinationPassword) {
+        // Connect to the destination cluster with authentication if provided
+        Cluster.Builder destinationBuilder = Cluster.builder().addContactPoint(destination);
+        if (destinationUsername != null) {
+            destinationBuilder.withCredentials(
+                destinationUsername,
+                destinationPassword
+            );
+        }
+        
+        try (Cluster destinationCluster = destinationBuilder.build();
              Session destinationSession = destinationCluster.connect()) {
 
             List<CDCConsumer> startedConsumers = new ArrayList<>();
             String[] tablesToReplicate = tables.split(",");
 
             for (String table : tablesToReplicate) {
-                validateTableExists(destinationCluster, keyspace, table,
+                final String sourceTable;
+                final String destinationTable;
+                if (table.contains(":")) {
+                    sourceTable = table.split(":")[0];
+                    destinationTable = table.split(":")[1];
+                } else {
+                    sourceTable = table;
+                    destinationTable = table;
+                }
+                validateTableExists(destinationCluster, keyspace, destinationTable,
                         "Before running the replicator, create the corresponding tables in your destination cluster.");
 
                 // Start a CDCConsumer for each replicated table,
@@ -56,10 +74,14 @@ public class Main {
                 // onto the destination cluster.
                 CDCConsumer consumer = CDCConsumer.builder()
                         .addContactPoint(source)
+                        // Add source authentication if provided
+                        .withCredentials(
+                            sourceUsername,
+                            sourcePassword)
                         .withConsumerProvider((threadId) ->
                                 new ReplicatorConsumer(mode, destinationCluster, destinationSession,
-                                        keyspace, table, consistencyLevel))
-                        .addTable(new TableName(keyspace, table))
+                                        keyspace, destinationTable, consistencyLevel))
+                        .addTable(new TableName(keyspace, sourceTable))
                         .withWorkersCount(1)
                         .build();
 
@@ -110,11 +132,17 @@ public class Main {
         ArgumentParser parser = ArgumentParsers.newFor("./scylla-cdc-replicator").build().defaultHelp(true);
         parser.addArgument("-m", "--mode").setDefault("delta").help("Mode of operation. Can be delta, preimage or postimage. Default is delta");
         parser.addArgument("-k", "--keyspace").required(true).help("Keyspace name");
-        parser.addArgument("-t", "--table").required(true).help("Table names, provided as a comma delimited string");
+        parser.addArgument("-t", "--table").required(true).help("Table names, provided as a comma delimited string. Optionally, each entry can be of format source_table_name:destination_table_name");
         parser.addArgument("-s", "--source").required(true).help("Address of a node in source cluster");
         parser.addArgument("-d", "--destination").required(true).help("Address of a node in destination cluster");
         parser.addArgument("-cl", "--consistency-level").setDefault("quorum")
                 .help("Consistency level of writes. QUORUM by default");
+        
+        // Add new authentication arguments
+        parser.addArgument("--source-username").help("Username for source cluster authentication");
+        parser.addArgument("--source-password").help("Password for source cluster authentication");
+        parser.addArgument("--destination-username").help("Username for destination cluster authentication");
+        parser.addArgument("--destination-password").help("Password for destination cluster authentication");
 
         try {
             return parser.parseArgs(args);

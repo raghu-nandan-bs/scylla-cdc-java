@@ -29,17 +29,28 @@ public class Main {
         String keyspace = parsedArguments.getString("keyspace");
         String table = parsedArguments.getString("table");
         ConsistencyLevel consistencyLevel = ConsistencyLevel.valueOf(parsedArguments.getString("consistency_level").toUpperCase());
-
+        String sourceUsername = parsedArguments.getString("source_username");
+        String sourcePassword = parsedArguments.getString("source_password");
+        String destinationUsername = parsedArguments.getString("destination_username");
+        String destinationPassword = parsedArguments.getString("destination_password");
 
         // Start replicating changes from source cluster to destination cluster
         // of selected tables.
-        startReplicator(replicatorMode, source, destination, keyspace, table, consistencyLevel);
+        startReplicator(replicatorMode, source, destination, keyspace, table, consistencyLevel, sourceUsername, sourcePassword, destinationUsername, destinationPassword);
     }
 
     private static void startReplicator(Mode mode, String source, String destination, String keyspace, String tables,
-                                        ConsistencyLevel consistencyLevel) {
-        // Connect to the destination cluster.
-        try (Cluster destinationCluster = Cluster.builder().addContactPoint(destination).build();
+                                        ConsistencyLevel consistencyLevel, String sourceUsername, String sourcePassword, String destinationUsername, String destinationPassword) {
+        // Connect to the destination cluster with authentication if provided
+        Cluster.Builder destinationBuilder = Cluster.builder().addContactPoint(destination);
+        if (destinationUsername != null) {
+            destinationBuilder.withCredentials(
+                destinationUsername,
+                destinationPassword
+            );
+        }
+        
+        try (Cluster destinationCluster = destinationBuilder.build();
              Session destinationSession = destinationCluster.connect()) {
 
             List<CDCConsumer> startedConsumers = new ArrayList<>();
@@ -63,6 +74,10 @@ public class Main {
                 // onto the destination cluster.
                 CDCConsumer consumer = CDCConsumer.builder()
                         .addContactPoint(source)
+                        // Add source authentication if provided
+                        .withCredentials(
+                            sourceUsername,
+                            sourcePassword)
                         .withConsumerProvider((threadId) ->
                                 new ReplicatorConsumer(mode, destinationCluster, destinationSession,
                                         keyspace, destinationTable, consistencyLevel))
@@ -122,6 +137,12 @@ public class Main {
         parser.addArgument("-d", "--destination").required(true).help("Address of a node in destination cluster");
         parser.addArgument("-cl", "--consistency-level").setDefault("quorum")
                 .help("Consistency level of writes. QUORUM by default");
+        
+        // Add new authentication arguments
+        parser.addArgument("--source-username").help("Username for source cluster authentication");
+        parser.addArgument("--source-password").help("Password for source cluster authentication");
+        parser.addArgument("--destination-username").help("Username for destination cluster authentication");
+        parser.addArgument("--destination-password").help("Password for destination cluster authentication");
 
         try {
             return parser.parseArgs(args);
